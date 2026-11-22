@@ -1,0 +1,1299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Railex Assembly Fleet</title>
+<!--
+  FILE: dashboard/index.html - RAILEX ASSEMBLY FLEET DASHBOARD (Python program)
+  ==============================================================================
+  One self-contained web page (no server, no libraries). It shows every
+  deployed Railex Assembly (Python) station - assembly CONVEYOR stations and
+  ASSEMBLY RAIL stations (a fixed rail of numbered hooks with LED lights):
+  customer, store number, last report, garments and orders (today / this
+  week / this month), slots moved (conveyors only, shown in thousands:
+  15,454 slots = "15.45k Slots"), maintenance status (conveyors only),
+  the rail's hooks and LED strip (rails only), Split Orders and open crash
+  reports.
+
+  It is published from the public repository
+  Paul6347/Assembly-Fleet-Python-Dashboard (GitHub Pages):
+      https://paul6347.github.io/Assembly-Fleet-Python-Dashboard/
+
+  WHERE THE NUMBERS COME FROM
+    Every station updates its GitHub issue "Station report: <name>" in the
+    private fleet repository (default Paul6347/Assembly-Fleet-Python) once
+    an hour. The issue ends with the numbers as hidden JSON
+    (<!- - railex-station-data {...} - ->), and once a day a comment adds
+    yesterday's totals (<!- - railex-daily {...} - ->). This page reads those
+    issues with the GitHub API, in the viewer's own browser, using a
+    READ-ONLY token the viewer enters once. No data is stored in this file,
+    so the page itself can be hosted publicly while the data stays private
+    in the fleet repository.
+
+  STATION TYPES (field "station_type" in the hidden JSON)
+    "conveyor"       - one or more conveyors ("conveyors" list), slots moved,
+                       maintenance interval and status.
+    "assembly_rail"  - nothing moves: "conveyors" is empty, "rail" holds the
+                       hooks (first_slot .. last_slot) and whether the LED
+                       strip is connected ("leds_connected", "led_port").
+                       A rail has no maintenance, so it never shows a
+                       maintenance bar and is never in the maintenance
+                       filters. "LEDs not found" counts as a problem.
+    Both report "split_orders" (on/off) and "max_slot_occupancy" (the most
+    garments one slot / hook may hold when Split Orders is on).
+
+  THE TOKEN
+    A fine-grained personal access token with access to only the fleet
+    repository and "Issues: Read-only". It is kept in this browser only
+    (and only if "Remember" is ticked), under its own keys ("rap-repo",
+    "rap-token") so it never mixes with any other page's saved settings.
+
+  MAINTENANCE INTERVALS (set from this page)
+    "Fleet settings" (top right) sets a default maintenance interval for
+    every conveyor station; a station's details set its own. They are kept
+    in one issue labelled "fleet-settings" (a readable table plus a hidden
+    block <!- - railex-fleet-settings ... - ->), which every station reads
+    once an hour and applies. Changing them needs a token with
+    "Issues: Read and write"; with a read-only token the page only shows
+    them. Assembly Rails ignore them (nothing moves).
+
+  Open the page with ?demo to see it with made-up data.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f4f1;
+    --surface: #fcfcfb;
+    --surface-2: #f0efec;
+    --border: #e2e1dc;
+    --grid: #e8e7e3;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --muted: #77766f;
+    --accent: #2a78d6;
+    --accent-soft: #cde2fb;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --track: #e6e5e0;
+    --bad-text: #b42b2b;      /* red TEXT ("LEDs not found"), readable on the surfaces */
+    --tag-bg: #cde2fb;        /* the small "Python" tag next to the title */
+    --tag-text: #124a8c;
+    --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #121211;
+      --surface: #1a1a19;
+      --surface-2: #232321;
+      --border: #30302d;
+      --grid: #2b2b29;
+      --text: #f0efec;
+      --text-2: #c3c2b7;
+      --muted: #9a998f;
+      --accent: #3987e5;
+      --accent-soft: #184f95;
+      --track: #2e2e2b;
+      --bad-text: #f07a7a;
+      --tag-bg: #184f95;
+      --tag-text: #e3eefc;
+      --shadow: 0 1px 2px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --border: #30302d;
+    --grid: #2b2b29;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #9a998f;
+    --accent: #3987e5;
+    --accent-soft: #184f95;
+    --track: #2e2e2b;
+    --bad-text: #f07a7a;
+    --tag-bg: #184f95;
+    --tag-text: #e3eefc;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input { font: inherit; color: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+  .token-id { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; color: var(--text-2); }
+
+  /* ---------- header ---------- */
+  header.top {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 18px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .logo {
+    width: 38px; height: 38px; border-radius: 10px; background: var(--accent); flex: none;
+    display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 19px;
+  }
+  .brand h1 { margin: 0; font-size: 19px; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tag {
+    display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .03em;
+    padding: 2px 8px; border-radius: 999px; background: var(--tag-bg); color: var(--tag-text);
+  }
+  .brand .sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 9px;
+    padding: 8px 14px; cursor: pointer; min-height: 40px;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.07); }
+  .btn:focus-visible, input:focus-visible, .chip:focus-visible, tr.row:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  main { max-width: 1560px; margin: 0 auto; padding: 20px 24px 48px; }
+  .note { color: var(--text-2); font-size: 13px; margin: 0 0 14px; min-height: 1.4em; }
+  .note.error { color: var(--critical); font-weight: 600; }
+
+  /* ---------- connect panel ---------- */
+  .connect {
+    max-width: 620px; margin: 24px auto; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px; box-shadow: var(--shadow);
+  }
+  .connect h2 { margin: 0 0 6px; font-size: 20px; }
+  .connect p { color: var(--text-2); margin: 0 0 16px; }
+  .field { display: grid; gap: 6px; margin-bottom: 14px; }
+  .field label { font-weight: 600; font-size: 14px; }
+  .field input[type=text], .field input[type=password], .search {
+    width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border);
+    background: var(--bg); min-height: 42px;
+  }
+  .field small { color: var(--muted); }
+  .check { display: flex; align-items: center; gap: 8px; margin: 4px 0 18px; }
+  .check input { width: 18px; height: 18px; }
+  .connect .row-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  /* ---------- maintenance interval forms ---------- */
+  .setform { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0 6px; }
+  .setform input {
+    width: 120px; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--border);
+    background: var(--bg); min-height: 40px; font-variant-numeric: tabular-nums;
+  }
+  .setform .unit { color: var(--text-2); font-size: 14px; }
+  .set-msg { font-size: 13px; color: var(--text-2); margin: 6px 0 0; min-height: 1.3em; }
+  .set-msg.error { color: var(--critical); font-weight: 600; }
+  .set-msg.ok { color: var(--good); font-weight: 600; }
+  .pending { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-2); }
+  .overrides { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
+  .overrides td { padding: 8px 6px; border-top: 1px solid var(--border); vertical-align: middle; }
+  .overrides .btn { min-height: 34px; padding: 4px 10px; }
+
+  /* ---------- KPI tiles ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; box-shadow: var(--shadow); min-width: 0;
+  }
+  .tile .label { color: var(--text-2); font-size: 13px; }
+  .tile .value { font-size: 28px; font-weight: 650; letter-spacing: -.02em; margin-top: 2px; }
+  .tile .hint { color: var(--muted); font-size: 12.5px; margin-top: 2px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+  /* ---------- filters ---------- */
+  .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .search { max-width: 320px; flex: 1 1 220px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 999px;
+    padding: 6px 12px; cursor: pointer; font-size: 13.5px; min-height: 36px;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .chip .count { color: inherit; opacity: .7; }
+
+  /* ---------- table ---------- */
+  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 11px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th {
+    font-size: 12.5px; color: var(--text-2); font-weight: 600; background: var(--surface-2);
+    position: sticky; top: 0; cursor: pointer; user-select: none;
+  }
+  th .arrow { color: var(--muted); margin-left: 4px; }
+  th.r, td.r { text-align: right; }
+  tr.row { cursor: pointer; }
+  tr.row:hover td { background: var(--surface-2); }
+  tr:last-child td { border-bottom: 0; }
+  .dep-name { font-weight: 650; }
+  .dep-sub { color: var(--muted); font-size: 12.5px; }
+  .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+
+  /* ---------- status + meter ---------- */
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  .status .ico {
+    width: 16px; height: 16px; border-radius: 50%; display: inline-grid; place-items: center;
+    font-size: 11px; font-weight: 800; color: #fff; flex: none;
+  }
+  .ico.good { background: var(--good); }
+  .ico.warning { background: var(--warning); color: #1a1a19; }
+  .ico.serious { background: var(--serious); color: #1a1a19; }
+  .ico.critical { background: var(--critical); }
+  .ico.none { background: var(--track); color: var(--text-2); }
+  /* station type (Conveyor / Assembly Rail) and the rail's LED strip */
+  .type { font-weight: 600; font-size: 13.5px; }
+  .bad { color: var(--bad-text); font-weight: 650; }
+  .leds { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+  .dot.on { background: var(--good); }
+  .dot.off { background: var(--critical); }
+  .meter { display: grid; gap: 4px; min-width: 132px; }
+  .meter .track { height: 7px; border-radius: 4px; background: var(--track); overflow: hidden; }
+  .meter .fill { height: 100%; border-radius: 4px; }
+  .meter .cap { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+
+  /* ---------- detail drawer ---------- */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 20; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 100vw); z-index: 21;
+    background: var(--bg); border-left: 1px solid var(--border); overflow-y: auto;
+    box-shadow: -8px 0 32px rgba(0,0,0,.18);
+  }
+  .drawer-head {
+    position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 16px 20px; display: flex; align-items: flex-start; gap: 12px;
+  }
+  .drawer-head h2 { margin: 0; font-size: 20px; }
+  .drawer-head .sub { color: var(--muted); font-size: 13px; }
+  .drawer-head .btn { margin-left: auto; flex: none; }
+  .drawer-body { padding: 18px 20px 40px; display: grid; gap: 16px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
+  .panel h3 { margin: 0 0 12px; font-size: 15px; }
+  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 16px; }
+  .meta div { min-width: 0; }
+  .meta .k { color: var(--muted); font-size: 12.5px; }
+  .meta .v { font-weight: 600; overflow-wrap: anywhere; }
+  .mini { width: 100%; border-collapse: collapse; }
+  .mini th, .mini td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-size: 14px; position: static; cursor: default; }
+  .mini th { background: transparent; }
+  .conv { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+  .conv:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .conv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .conv-head b { font-size: 15px; }
+  .chart { width: 100%; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart-title { font-weight: 600; font-size: 14px; margin: 0 0 2px; }
+  .chart-sub { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+  .charts { display: grid; gap: 18px; }
+  details summary { cursor: pointer; color: var(--text-2); font-size: 13.5px; }
+  a { color: var(--accent); }
+
+  /* ---------- tooltip ---------- */
+  .tip {
+    position: fixed; z-index: 40; pointer-events: none; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.18); max-width: 240px;
+  }
+  .tip b { display: block; font-size: 15px; }
+  .tip span { color: var(--text-2); }
+
+  @media (max-width: 720px) {
+    header.top { padding: 14px 16px; }
+    main { padding: 16px 16px 40px; }
+    .drawer-body { padding: 14px 16px 32px; }
+    .tile .value { font-size: 24px; }
+    .actions { margin-left: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">R</div>
+    <div>
+      <h1>Railex Assembly Fleet <span class="tag" title="Stations running the Python program">Python</span></h1>
+      <div class="sub" id="subtitle">Assembly conveyors and Assembly Rails</div>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn" id="btn-fleet" type="button">Fleet settings</button>
+    <button class="btn" id="btn-refresh" type="button">Refresh</button>
+    <button class="btn" id="btn-settings" type="button">Connection</button>
+  </div>
+</header>
+
+<main>
+  <section class="connect" id="connect" hidden>
+    <h2>Connect to the fleet repository</h2>
+    <p>The stations report to a private GitHub repository. Enter it and a read-only access token to see the fleet. Nothing is sent anywhere except to GitHub.</p>
+    <form id="connect-form">
+      <div class="field">
+        <label for="in-repo">Repository</label>
+        <input id="in-repo" type="text" placeholder="Paul6347/Assembly-Fleet-Python" autocomplete="off" spellcheck="false">
+        <small>The same repository the stations use ("github_repo" in each station's config.json).</small>
+      </div>
+      <div class="field">
+        <label for="in-token">Read-only access token</label>
+        <input id="in-token" type="password" placeholder="github_pat_..." autocomplete="off" spellcheck="false">
+        <small>A fine-grained token with access to only this repository and the permission <b>Issues: Read-only</b>.</small>
+      </div>
+      <label class="check"><input id="in-remember" type="checkbox" checked> Remember on this computer</label>
+      <div class="row-btns">
+        <button class="btn primary" type="submit">Show the fleet</button>
+        <button class="btn" id="btn-demo" type="button">Try with demo data</button>
+      </div>
+    </form>
+  </section>
+
+  <p class="note" id="note" role="status"></p>
+
+  <div id="dash" hidden>
+    <section class="kpis" id="kpis" aria-label="Fleet totals"></section>
+
+    <section class="filters" aria-label="Filter deployments">
+      <input class="search" id="search" type="search" placeholder="Search customer, store, station..." aria-label="Search deployments">
+      <div class="chips" id="chips"></div>
+    </section>
+
+    <section class="table-card">
+      <div class="table-wrap">
+        <table id="fleet" aria-label="Deployments">
+          <thead><tr id="head"></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+    <p class="note" style="margin-top:12px">Stations update their numbers every hour while the program is running. Click a deployment for its conveyors or rail and the last 30 days.</p>
+  </div>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-modal="true" role="dialog" aria-labelledby="d-title"></aside>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+"use strict";
+/* =========================================================================
+   SMALL HELPERS
+   ========================================================================= */
+const $ = (id) => document.getElementById(id);
+const NF = new Intl.NumberFormat("en-US");
+const fmt = (n) => (n == null || !isFinite(n) ? "-" : NF.format(Math.round(n)));
+/* Every distance is SLOTS moved (not feet or metres), shown in thousands
+   like on the stations: 15,454 -> "15.45k Slots", 29,696 -> "29.70k Slots" */
+const NF2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function fmtK(n) { return n == null || !isFinite(n) ? "-" : NF2.format(Math.round(n / 10) / 100) + "k"; }
+function fmtSlots(n) { return n == null || !isFinite(n) ? "-" : fmtK(n) + " Slots"; }
+
+/* Makes one station's hidden JSON safe to show: the lists and blocks the
+   page reads always exist, and the station type is always one of the two
+   known values. A station whose JSON has no "station_type" is a conveyor
+   station unless it has a "rail" block. */
+function normalizeStation(d) {
+  if (!Array.isArray(d.conveyors)) d.conveyors = [];
+  if (d.rail && typeof d.rail !== "object") d.rail = null;
+  d.station_type = d.station_type === "assembly_rail" || (d.station_type == null && d.rail) ? "assembly_rail" : "conveyor";
+  return d;
+}
+/* A daily summary: an Assembly Rail moves nothing, so a missing "slots" is 0 */
+function normalizeDay(d) {
+  if (d.slots == null) d.slots = 0;
+  return d;
+}
+/* ---- station type helpers ---- */
+function isRail(st) { return st.station_type === "assembly_rail"; }
+function typeName(st) { return isRail(st) ? "Assembly Rail" : "Conveyor"; }
+/* the rail's hooks: the "rail" block's first..last, or the station's slot count */
+function hookCount(st) {
+  const r = st.rail || {};
+  if (isFinite(r.first_slot) && isFinite(r.last_slot) && r.last_slot >= r.first_slot) return r.last_slot - r.first_slot + 1;
+  return st.total_slots || 0;
+}
+/* true / false when the station said whether its LED strip is connected; null = not reported */
+function ledsConnected(st) {
+  const r = st.rail;
+  return r && typeof r.leds_connected === "boolean" ? r.leds_connected : null;
+}
+/* the LED strip as a small element: green dot "Connected (COM7)" or red "Not found" */
+function ledsEl(st, long) {
+  const on = ledsConnected(st);
+  if (on == null) return h("span", { class: "dep-sub" }, "LEDs not reported");
+  const port = st.rail && st.rail.led_port ? ` (${st.rail.led_port})` : "";
+  return on
+    ? h("span", { class: "leds" }, h("span", { class: "dot on", "aria-hidden": "true" }), (long ? "Connected" : "LEDs connected") + (long ? port : ""))
+    : h("span", { class: "leds bad" }, h("span", { class: "dot off", "aria-hidden": "true" }), long ? "Not found" : "LEDs not found");
+}
+/* Split Orders as text: "On - max 3 garments per slot" / "Off" */
+function splitText(st, hooks) {
+  if (st.split_orders == null) return "-";
+  if (!st.split_orders) return "Off";
+  const n = st.max_slot_occupancy;
+  return n > 0 ? `On · max ${fmt(n)} garment${n === 1 ? "" : "s"} per ${hooks ? "hook" : "slot"}` : "On";
+}
+function ago(unix) {
+  if (!unix) return "never";
+  const s = Math.max(0, Date.now() / 1000 - unix);
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 48 * 3600) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " days ago";
+}
+function usDate(day) { const p = String(day || "").split("-"); return p.length === 3 ? `${p[1]}/${p[2]}/${p[0]}` : String(day || ""); }
+function usDateTime(ts) {
+  if (!ts) return "";
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)/.exec(ts);
+  if (!m) return ts;
+  let h = +m[4]; const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12;
+  return `${m[2]}/${m[3]}/${m[1]} ${String(h).padStart(2, "0")}:${m[5]} ${ap}`;
+}
+/* build DOM safely: every piece of station text goes in as textContent */
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
+};
+function note(text, isError) { const n = $("note"); n.textContent = text || ""; n.classList.toggle("error", !!isError); }
+
+/* =========================================================================
+   STATE
+   ========================================================================= */
+/* The fleet repository this page shows when the viewer has not entered
+   another one (and no ?repo=owner/name is in the address). */
+const DEFAULT_REPO = "Paul6347/Assembly-Fleet-Python";
+/* where this browser keeps the repository and (if "Remember" is ticked)
+   the token - this page's own keys, prefix "rap-" */
+const KEY_REPO = "rap-repo", KEY_TOKEN = "rap-token";
+const S = {
+  repo: store.get(KEY_REPO) || DEFAULT_REPO,
+  token: store.get(KEY_TOKEN) || "",
+  demo: /[?&]demo\b/.test(location.search),
+  stations: [],
+  crashes: {},
+  filter: "all",
+  search: "",
+  sort: { key: "status", dir: -1 },   /* problems first */
+  history: {},
+  /* the maintenance intervals set on this page (issue "fleet-settings"):
+     def = default for all stations, stations = { machine id: slots } */
+  fleet: { issue: null, url: null, def: null, stations: {} },
+};
+const qsRepo = new URLSearchParams(location.search).get("repo");
+if (qsRepo) S.repo = qsRepo;
+
+/* =========================================================================
+   GITHUB API (read-only)
+   ========================================================================= */
+async function gh(url) {
+  const res = await fetch(url.startsWith("http") ? url : "https://api.github.com" + url, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(S.token ? { Authorization: "Bearer " + S.token } : {}),
+    },
+  });
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    if (res.status === 401) msg = "GitHub refused the token (401). It may be wrong or expired.";
+    else if (res.status === 404) msg = "Repository not found (404). Check the name, and that the token has access to it.";
+    else if (res.status === 403) msg = "GitHub refused (403). The token may lack Issues: Read access, or the hourly limit was reached.";
+    throw new Error(msg);
+  }
+  const next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("Link") || "");
+  return { data: await res.json(), next: next ? next[1] : null };
+}
+async function ghAll(path, maxPages = 10) {
+  let url = path, out = [];
+  for (let i = 0; url && i < maxPages; i++) {
+    const r = await gh(url);
+    out = out.concat(r.data);
+    url = r.next;
+  }
+  return out;
+}
+/* (written with \x3C / \x3E so the page's own HTML parser never sees a comment marker here) */
+const DATA_RE = /\x3C!--\s*railex-station-data\s*([\s\S]*?)\s*--\x3E/;
+const DAILY_RE = /\x3C!--\s*railex-daily\s*([\s\S]*?)\s*--\x3E/;
+function stationLabel(name) { return ("station: " + String(name).trim()).slice(0, 50); }
+
+async function loadFleet() {
+  const [issues, crashIssues, fleet] = await Promise.all([
+    ghAll(`/repos/${S.repo}/issues?labels=station-report&state=all&per_page=100`),
+    ghAll(`/repos/${S.repo}/issues?labels=crash&state=open&per_page=100`, 5),
+    loadFleetSettings(),
+  ]);
+  const stations = [];
+  for (const is of issues) {
+    /* a CLOSED station issue is a retired station (or an old duplicate):
+       not shown. A station that is still running re-opens its issue at its
+       next hourly report. */
+    if (is.state === "closed") continue;
+    const m = DATA_RE.exec(is.body || "");
+    if (!m) continue;
+    try {
+      const d = JSON.parse(m[1]);
+      d.issue = is.number;
+      d.url = is.html_url;
+      stations.push(normalizeStation(d));
+    } catch (e) { /* a station with damaged data is skipped */ }
+  }
+  /* One row per deployment: a station that was renamed or reinstalled may
+     have started a second issue. Two issues are the same deployment when
+     they have the same machine id or the same computer AND station name;
+     only the most recent report is shown. */
+  stations.sort((a, b) => (b.reported_unix || 0) - (a.reported_unix || 0));
+  const seen = new Set();
+  const unique = [];
+  for (const st of stations) {
+    const keys = [st.machine_id ? "m:" + st.machine_id : null, "c:" + (st.computer || "") + "|" + (st.station || "")].filter(Boolean);
+    if (keys.some((k) => seen.has(k))) continue;
+    keys.forEach((k) => seen.add(k));
+    unique.push(st);
+  }
+  stations.length = 0;
+  stations.push(...unique);
+  const crashes = {};
+  for (const c of crashIssues) {
+    for (const l of c.labels || []) {
+      const name = typeof l === "string" ? l : l.name;
+      if (name && name.startsWith("station: ")) crashes[name] = (crashes[name] || 0) + 1;
+    }
+  }
+  return { stations, crashes, fleet };
+}
+async function loadHistory(st) {
+  const since = new Date(Date.now() - 40 * 86400 * 1000).toISOString();
+  const comments = await ghAll(`/repos/${S.repo}/issues/${st.issue}/comments?since=${since}&per_page=100`, 3);
+  const byDay = {};
+  for (const c of comments) {
+    const m = DAILY_RE.exec(c.body || "");
+    if (!m) continue;
+    try { const d = JSON.parse(m[1]); if (d.day) byDay[d.day] = normalizeDay(d); } catch (e) {}
+  }
+  return byDay;
+}
+
+/* =========================================================================
+   FLEET SETTINGS: MAINTENANCE INTERVALS SET FROM THIS PAGE
+   One open issue labelled "fleet-settings" holds them. Its text is a
+   readable table plus a hidden block the stations read (railex/github.py
+   fleet_interval_for), one line each:
+       default maintenance_interval_slots=150000
+       station <machine id> maintenance_interval_slots=200000
+   A station's own line wins over the default. 0 = no reminders.
+   ========================================================================= */
+const SETTINGS_RE = /\x3C!--\s*railex-fleet-settings([\s\S]*?)--\x3E/;
+const MAX_INTERVAL = 100000000;
+const MIN_SETTINGS_VERSION = "1.0.0";   /* first station version that reads them (every reporting station) */
+function parseFleetSettings(body) {
+  const out = { def: null, stations: {} };
+  const m = SETTINGS_RE.exec(body || "");
+  if (!m) return out;
+  for (const line of m[1].split(/\r?\n/)) {
+    const w = line.trim().split(/\s+/);
+    const kv = w.find((x) => x.startsWith("maintenance_interval_slots="));
+    const v = kv ? kv.split("=")[1] : "";
+    if (!/^\d+$/.test(v) || Number(v) > MAX_INTERVAL) continue;
+    if (w[0] === "default") out.def = Number(v);
+    else if (w[0] === "station" && /^[0-9a-f]+$/i.test(w[1] || "")) out.stations[w[1].toLowerCase()] = Number(v);
+  }
+  return out;
+}
+async function loadFleetSettings() {
+  const list = await ghAll(`/repos/${S.repo}/issues?labels=fleet-settings&state=open&per_page=10`, 1);
+  const is = list.find((i) => SETTINGS_RE.test(i.body || ""));
+  return is ? { issue: is.number, url: is.html_url, ...parseFleetSettings(is.body) } : { issue: null, url: null, def: null, stations: {} };
+}
+/* what the dashboard has set for this station: { value, source } or null */
+function setInterval_(st) {
+  const id = (st.machine_id || "").toLowerCase();
+  if (id && S.fleet.stations[id] != null) return { value: S.fleet.stations[id], source: "own" };
+  if (S.fleet.def != null) return { value: S.fleet.def, source: "default" };
+  return null;
+}
+function versionAtLeast(v, min) {
+  const a = String(v || "0").split(".").map(Number), b = min.split(".").map(Number);
+  for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); }
+  return true;
+}
+/* the set value is not in the station's report yet (never for an
+   Assembly Rail: it has no maintenance, so it has nothing to take) */
+function intervalPending(st) {
+  if (isRail(st)) return false;
+  const set = setInterval_(st);
+  return !!set && set.value !== (st.maintenance_interval_slots || 0);
+}
+function intervalText(n) { return n > 0 ? fmtSlots(n) : "off (no reminders)"; }
+/* thousands of slots typed in the box -> slots; null if not a valid number */
+function readK(input) {
+  const t = String(input.value || "").trim().replace(/,/g, "").replace(/k$/i, "");
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  const n = Math.round(Number(t) * 1000);
+  return n <= MAX_INTERVAL ? n : null;
+}
+function kValue(n) { return n == null ? "" : String(Math.round(n / 10) / 100); }
+
+async function ghSend(method, path, body) {
+  const res = await fetch("https://api.github.com" + path, {
+    method,
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + S.token,
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) return res.status === 204 ? null : res.json();
+  if (res.status === 422 && path.endsWith("/labels")) return null; /* the label is already there */
+  if (res.status === 401) throw new Error("GitHub refused the token (401). It may be wrong or expired.");
+  if (res.status === 403 || res.status === 404)
+    throw new Error("GitHub did not allow the change (" + res.status + "). This page's token can only read: on GitHub, give the dashboard's token \"Issues: Read and write\" (Settings > Developer settings > Fine-grained tokens), then try again.");
+  throw new Error("GitHub error " + res.status + ": " + (await res.text()).slice(0, 200));
+}
+function settingsBody(fs) {
+  const names = {};
+  for (const st of S.stations) if (st.machine_id) names[st.machine_id.toLowerCase()] = derive(st).name;
+  const cell = (t) => String(t).replace(/\|/g, "/");
+  const lines = [
+    "Maintenance intervals for the Railex Assembly stations, set on the fleet dashboard.",
+    "Please change them there. Every station reads this issue once an hour; a station's own interval wins over the default.",
+    "Assembly Rails have no maintenance (nothing moves) and ignore them.",
+    "",
+    "| Applies to | Maintenance interval |",
+    "|---|---|",
+    `| All stations (default) | ${fs.def == null ? "not set (each station keeps its own)" : intervalText(fs.def)} |`,
+  ];
+  for (const [id, n] of Object.entries(fs.stations)) lines.push(`| ${cell(names[id] || "Station")} (${id}) | ${intervalText(n)} |`);
+  lines.push("", "\x3C!-- railex-fleet-settings");
+  if (fs.def != null) lines.push(`default maintenance_interval_slots=${fs.def}`);
+  for (const [id, n] of Object.entries(fs.stations)) lines.push(`station ${id} maintenance_interval_slots=${n}`);
+  lines.push("--\x3E", "");
+  return lines.join("\n");
+}
+/* read the settings again (someone may have changed them), apply `change`,
+   write them back - creating the issue the first time */
+async function saveFleetSettings(change) {
+  if (S.demo) { change(S.fleet); return; }
+  const fresh = await loadFleetSettings();
+  change(fresh);
+  const body = settingsBody(fresh);
+  if (fresh.issue) {
+    await ghSend("PATCH", `/repos/${S.repo}/issues/${fresh.issue}`, { body });
+  } else {
+    await ghSend("POST", `/repos/${S.repo}/labels`, { name: "fleet-settings", color: "5319e7", description: "Settings set on the fleet dashboard" });
+    const is = await ghSend("POST", `/repos/${S.repo}/issues`, { title: "Fleet settings (set on the fleet dashboard)", body, labels: ["fleet-settings"] });
+    fresh.issue = is.number; fresh.url = is.html_url;
+  }
+  S.fleet = fresh;
+}
+/* runs a save, showing progress / the result in `msg` */
+async function runSave(msg, buttons, what, change, after) {
+  buttons.forEach((b) => (b.disabled = true));
+  msg.className = "set-msg"; msg.textContent = "Saving...";
+  try {
+    await saveFleetSettings(change);
+    msg.className = "set-msg ok"; msg.textContent = what;
+    render();
+    if (after) after(what);
+  } catch (e) {
+    msg.className = "set-msg error"; msg.textContent = e.message;
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+/* the "Maintenance interval" panel in a station's details */
+function intervalPanel(st, flash) {
+  const id = (st.machine_id || "").toLowerCase();
+  const set = setInterval_(st);
+  const reported = st.maintenance_interval_slots || 0;
+  const msg = h("p", { class: "set-msg" + (flash ? " ok" : ""), role: "status" }, flash || "");
+  const kids = [h("h3", {}, "Maintenance interval"),
+    h("p", { class: "dep-sub", style: "margin:0" }, `The station uses: ${intervalText(reported)}` +
+      (set ? ` · set on the dashboard: ${intervalText(set.value)} (${set.source === "own" ? "this station" : "fleet default"})` : " · not set on the dashboard"))];
+  if (set && intervalPending(st))
+    kids.push(h("p", { class: "pending" }, statusEl("warning", "~", ""), "Waiting for the station to take it - within an hour, if it is on and online."));
+  if (!id) {
+    kids.push(h("p", { class: "set-msg" }, "This station did not report a machine id, so its own interval cannot be set from here (the fleet default still applies)."));
+    return h("section", { class: "panel" }, ...kids);
+  }
+  if (!versionAtLeast(st.version, MIN_SETTINGS_VERSION))
+    kids.push(h("p", { class: "set-msg" }, `Note: this station runs ${st.version}; it takes the interval once it has updated to ${MIN_SETTINGS_VERSION} or later.`));
+  const input = h("input", { type: "text", inputmode: "decimal", value: kValue(set ? set.value : reported), "aria-label": "Maintenance interval in thousands of slots" });
+  const saveBtn = h("button", { class: "btn primary", type: "button" }, "Save for this station");
+  const defBtn = S.fleet.stations[id] != null ? h("button", { class: "btn", type: "button" }, "Use the fleet default") : null;
+  const buttons = [saveBtn, defBtn].filter(Boolean);
+  saveBtn.onclick = () => {
+    const n = readK(input);
+    if (n == null) { msg.className = "set-msg error"; msg.textContent = "Enter the interval in thousands of slots, e.g. 150 for 150,000 slots (0 = no reminders)."; return; }
+    runSave(msg, buttons, `Saved: ${intervalText(n)} for this station.`, (fs) => { fs.stations[id] = n; }, redraw);
+  };
+  if (defBtn) defBtn.onclick = () => runSave(msg, buttons,
+    S.fleet.def != null ? `This station now uses the fleet default.` : "Removed. The station keeps the interval it has now (no default is set).",
+    (fs) => { delete fs.stations[id]; }, redraw);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.click(); });
+  kids.push(h("div", { class: "setform" }, input, h("span", { class: "unit" }, "thousand slots"), ...buttons), msg,
+    h("p", { class: "dep-sub", style: "margin:4px 0 0" }, "For example 150 = 150,000 slots. 0 turns the maintenance reminders off."));
+  const panel = h("section", { class: "panel" }, ...kids);
+  /* after a save: redraw just this panel (the drawer keeps its scroll position) */
+  function redraw(what) { panel.replaceWith(intervalPanel(st, what)); }
+  return panel;
+}
+
+/* "Fleet settings": the default interval and the stations with their own */
+function openFleetSettings(flash) {
+  if (typeof flash !== "string") { flash = ""; lastFocus = document.activeElement; }
+  const dr = $("drawer");
+  const msg = h("p", { class: "set-msg" + (flash ? " ok" : ""), role: "status" }, flash);
+  const input = h("input", { type: "text", inputmode: "decimal", value: kValue(S.fleet.def), placeholder: "not set", "aria-label": "Default maintenance interval in thousands of slots" });
+  const saveBtn = h("button", { class: "btn primary", type: "button" }, "Save default");
+  const clearBtn = S.fleet.def != null ? h("button", { class: "btn", type: "button" }, "Remove default") : null;
+  const buttons = [saveBtn, clearBtn].filter(Boolean);
+  saveBtn.onclick = () => {
+    const n = readK(input);
+    if (n == null) { msg.className = "set-msg error"; msg.textContent = "Enter the interval in thousands of slots, e.g. 150 for 150,000 slots (0 = no reminders)."; return; }
+    runSave(msg, buttons, `Saved: ${intervalText(n)} for every station without its own.`, (fs) => { fs.def = n; }, openFleetSettings);
+  };
+  if (clearBtn) clearBtn.onclick = () => runSave(msg, buttons, "Default removed. Stations keep the interval they have now.", (fs) => { fs.def = null; }, openFleetSettings);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.click(); });
+  const byId = {};
+  for (const st of S.stations) if (st.machine_id) byId[st.machine_id.toLowerCase()] = st;
+  const own = Object.entries(S.fleet.stations);
+  const ownMsg = h("p", { class: "set-msg", role: "status" });
+  const pendingCount = S.stations.filter((st) => intervalPending(st)).length;
+  dr.replaceChildren(
+    h("div", { class: "drawer-head" },
+      h("div", {}, h("h2", { id: "d-title" }, "Fleet settings"), h("div", { class: "sub" }, "Maintenance intervals for the conveyor stations")),
+      h("button", { class: "btn", type: "button", onclick: closeDetail, "aria-label": "Close" }, "Close")),
+    h("div", { class: "drawer-body" },
+      h("section", { class: "panel" }, h("h3", {}, "Default for all stations"),
+        h("p", { class: "dep-sub", style: "margin:0" }, "Used by every conveyor station that has no interval of its own (set one in a station's details). Assembly Rails have no maintenance and ignore it."),
+        h("div", { class: "setform" }, input, h("span", { class: "unit" }, "thousand slots"), ...buttons), msg,
+        h("p", { class: "dep-sub", style: "margin:4px 0 0" }, "For example 150 = 150,000 slots. 0 turns the maintenance reminders off. Stations take a change within an hour.")),
+      h("section", { class: "panel" }, h("h3", {}, "Stations with their own interval"),
+        own.length ? h("table", { class: "overrides" }, h("tbody", {}, own.map(([id, n]) => {
+          const st = byId[id];
+          const rm = h("button", { class: "btn", type: "button" }, "Use default");
+          rm.onclick = () => runSave(ownMsg, [rm], "Removed.", (fs) => { delete fs.stations[id]; }, openFleetSettings);
+          return h("tr", {}, h("td", {}, st ? derive(st).name : "Station " + id, st ? null : h("div", { class: "dep-sub" }, "not reporting")),
+            h("td", { class: "num" }, intervalText(n)), h("td", { class: "r" }, rm));
+        }))) : h("p", { class: "dep-sub", style: "margin:0" }, "None - every station uses the default."),
+        ownMsg),
+      h("section", { class: "panel" }, h("h3", {}, "Status"),
+        h("p", { class: "dep-sub", style: "margin:0" },
+          (pendingCount ? `${pendingCount} station(s) have not taken the new interval yet. ` : "Every reporting conveyor station uses the interval set here. ") +
+          "The settings are kept in the fleet repository" + (S.fleet.url ? " - " : "."),
+          S.fleet.url ? h("a", { href: S.fleet.url, target: "_blank", rel: "noopener" }, `issue #${S.fleet.issue}`) : null),
+        h("p", { class: "dep-sub", style: "margin:8px 0 0" }, "Changing them needs a token with Issues: Read and write. With a read-only token this page shows them only."))));
+  dr.hidden = false; $("scrim").hidden = false;
+  input.focus();
+}
+
+/* =========================================================================
+   DEMO DATA (made up - for trying the page without a token)
+   ========================================================================= */
+function localStamp(unix) {
+  const d = new Date(unix * 1000), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function demoFleet() {
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const now = Math.floor(Date.now() / 1000);
+  const custs = [["Zips Dry Cleaners", "1042"], ["Zips Dry Cleaners", "1057"], ["Zips Dry Cleaners", "1103"], ["Prestige Cleaners", "12"],
+    ["Prestige Cleaners", "15"], ["Hangers Cleaners", "301"], ["Kiwi Cleaners", "8"], ["Dryclean USA", "220"], ["Dryclean USA", "231"], ["Martinizing", "77"]];
+  const stations = [], history = {}, crashes = {};
+  custs.forEach(([cust, num], i) => {
+    const interval = 250000; /* slots */
+    const daily = Math.round(1200 + rnd() * 1800); /* slots moved per day */
+    const since = Math.round(interval * (i === 2 ? 1.04 : i === 6 ? 0.93 : rnd() * 0.85));
+    const late = i === 8 ? 30 * 3600 : rnd() * 3000;
+    const g = Math.round(daily / 15);
+    const st = {
+      schema: 2, program: "railex-assembly-python", station_type: "conveyor", rail: null,
+      split_orders: i % 4 === 1, max_slot_occupancy: i % 4 === 1 ? 3 : 0,
+      station: `${cust} #${num}`, customer: cust, store_number: num, store_name: cust.split(" ")[0] + " " + num,
+      computer: "STATION-" + (100 + i), version: i === 5 ? "1.0.0" : "1.0.1", machine_id: (0x9c1e0000 + i).toString(16).padStart(16, "0"), token_id: i === 2 || i === 5 ? "b81e04d7" : "3fa2c91b", reported_unix: now - Math.round(late),
+      reported_at: localStamp(now - Math.round(late)), maintenance_interval_slots: interval, manual_mode: false, total_slots: i % 3 === 0 ? 268 : 104,
+      conveyors: [{ name: i % 3 === 0 ? "Primary" : "Conveyor", id: "primary_conveyor", first_slot: 1, last_slot: 104,
+        status: since >= interval ? "Due" : since >= interval * 0.9 ? "Due soon" : "OK",
+        since_maintenance_slots: since, last_maintenance: "2026-0" + (3 + (i % 6)) + "-1" + (i % 9) + " 09:30:00",
+        today_slots: Math.round(daily * 0.55), week_slots: Math.round(daily * 1.3), month_slots: Math.round(daily * 1.6), lifetime_slots: daily * 420,
+        lifetime_forward_slots: daily * 330, lifetime_backward_slots: daily * 90, lifetime_moves: Math.round(daily * 420 / 6) }],
+      today: { garments_processed: Math.round(g * 0.55), orders_completed: Math.round(g * 0.55 / 6.5), garments_due: g + 20,
+        orders_due: Math.round((g + 20) / 6.5), percent_complete: 55, items_per_hour: Math.round(g / 9), behind: i === 4, slots_occupied: Math.round(60 + rnd() * 40) },
+      yesterday: { garments: g, orders: Math.round(g / 6.5) },
+      week: { garments: Math.round(g * 1.3), orders: Math.round(g * 1.3 / 6.5) },
+      month: { garments: Math.round(g * 1.6), orders: Math.round(g * 1.6 / 6.5) },
+      issue: 100 + i, url: null,
+    };
+    if (i % 3 === 0) st.conveyors.push({ ...st.conveyors[0], name: "Secondary", id: "secondary_conveyor", first_slot: 300, last_slot: 463,
+      status: "OK", since_maintenance_slots: Math.round(since * 0.6), today_slots: Math.round(daily * 0.3) });
+    stations.push(st);
+    if (i === 3 || i === 7) crashes[stationLabel(st.station)] = i === 3 ? 2 : 1;
+    const days = {};
+    for (let k = 30; k >= 1; k--) {
+      const d = new Date(Date.now() - k * 86400000);
+      const day = d.toISOString().slice(0, 10);
+      if (d.getDay() === 0) continue; /* closed on Sundays */
+      const f = 0.7 + rnd() * 0.6;
+      days[day] = { day, slots: Math.round(daily * f), garments: Math.round(g * f), orders: Math.round(g * f / 6.5) };
+    }
+    history[st.issue] = days;
+  });
+  /* two Assembly Rails: nothing moves (no conveyors, no slots moved, no
+     maintenance); the second one's LED strip is not found (shown in red) */
+  [["Prestige Cleaners", "19", 1, 44, true, "COM7", true], ["Kiwi Cleaners", "11", 101, 160, false, "", false]].forEach(([cust, num, first, last, leds, port, split], j) => {
+    const i = 20 + j, hooks = last - first + 1;
+    const g = Math.round(70 + rnd() * 60);  /* garments per day */
+    const late = rnd() * 2400;
+    const st = {
+      schema: 2, program: "railex-assembly-python", station_type: "assembly_rail",
+      rail: { name: "Assembly Rail", first_slot: first, last_slot: last, leds_connected: leds, led_port: leds ? port : null },
+      split_orders: split, max_slot_occupancy: split ? 3 : 0,
+      station: `${cust} #${num}`, customer: cust, store_number: num, store_name: cust.split(" ")[0] + " " + num,
+      computer: "RAIL-" + (10 + j), version: "1.0.1", machine_id: (0x7a3b0000 + i).toString(16).padStart(16, "0"), token_id: "3fa2c91b",
+      reported_unix: now - Math.round(late), reported_at: localStamp(now - Math.round(late)),
+      maintenance_interval_slots: 0, manual_mode: false, total_slots: hooks, conveyors: [],
+      today: { garments_processed: Math.round(g * 0.6), orders_completed: Math.round(g * 0.6 / 5.5), garments_due: g + 8,
+        orders_due: Math.round((g + 8) / 5.5), percent_complete: 60, items_per_hour: Math.round(g / 9), behind: false, slots_occupied: Math.round(hooks * (0.3 + rnd() * 0.3)) },
+      yesterday: { garments: g, orders: Math.round(g / 5.5) },
+      week: { garments: Math.round(g * 1.3), orders: Math.round(g * 1.3 / 5.5) },
+      month: { garments: Math.round(g * 1.6), orders: Math.round(g * 1.6 / 5.5) },
+      issue: 100 + i, url: null,
+    };
+    stations.push(st);
+    const days = {};
+    for (let k = 30; k >= 1; k--) {
+      const d = new Date(Date.now() - k * 86400000);
+      const day = d.toISOString().slice(0, 10);
+      if (d.getDay() === 0) continue;
+      const f = 0.7 + rnd() * 0.6;
+      days[day] = { day, slots: 0, garments: Math.round(g * f), orders: Math.round(g * f / 5.5) };
+    }
+    history[st.issue] = days;
+  });
+  return { stations, crashes, history };
+}
+
+/* =========================================================================
+   DERIVED NUMBERS PER DEPLOYMENT
+   ========================================================================= */
+/* "LEDs not found" (an Assembly Rail whose LED strip is missing) is a
+   problem as serious as maintenance due, so "problems first" lists it on top */
+const RANK = { "Due": 3, "LEDs not found": 3, "Due soon": 2, "OK": 1, "Not set": 0 };
+function derive(st) {
+  const rail = isRail(st);
+  const conv = st.conveyors || [];
+  let worst = null;
+  for (const c of conv) {
+    const pct = st.maintenance_interval_slots > 0 ? c.since_maintenance_slots / st.maintenance_interval_slots : null;
+    if (!worst || (RANK[c.status] || 0) > (RANK[worst.status] || 0) || (pct || 0) > (worst.pct || 0)) worst = { ...c, pct };
+  }
+  const age = Date.now() / 1000 - (st.reported_unix || 0);
+  return {
+    name: (st.customer || st.store_name || st.station) + (st.store_number ? " #" + st.store_number : ""),
+    rail,
+    worst,
+    /* a rail has no maintenance: its status is its LED strip */
+    status: rail ? (ledsConnected(st) === false ? "LEDs not found" : "OK") : worst ? worst.status : "Not set",
+    offline: age > 26 * 3600,
+    todaySlots: conv.reduce((a, c) => a + (c.today_slots || 0), 0),
+    lifetimeSlots: conv.reduce((a, c) => a + (c.lifetime_slots || 0), 0),
+    crashes: S.crashes[stationLabel(st.station)] || 0,
+  };
+}
+function statusKind(status, offline) {
+  if (offline) return ["serious", "!", "No report 26 h+"];
+  return status === "LEDs not found" ? ["critical", "!", "LEDs not found"]
+    : status === "Due" ? ["critical", "!", "Maintenance due"]
+    : status === "Due soon" ? ["warning", "~", "Due soon"]
+    : status === "OK" ? ["good", "✓", "OK"]
+    : ["none", "-", "Not set"];
+}
+function statusEl(kind, icon, label) {
+  return h("span", { class: "status" }, h("span", { class: "ico " + kind, "aria-hidden": "true" }, icon), label);
+}
+function meter(c, interval) {
+  if (!(interval > 0) || !c) return h("span", { class: "dep-sub" }, c ? fmtSlots(c.since_maintenance_slots) + " (no interval set)" : "-");
+  const pct = Math.min(1, c.since_maintenance_slots / interval);
+  const color = c.status === "Due" ? "var(--critical)" : c.status === "Due soon" ? "var(--warning)" : "var(--good)";
+  return h("div", { class: "meter", title: `${fmtSlots(c.since_maintenance_slots)} of ${fmtSlots(interval)}` },
+    h("div", { class: "track" }, h("div", { class: "fill", style: `width:${Math.max(3, pct * 100).toFixed(1)}%;background:${color}` })),
+    h("div", { class: "cap num" }, h("span", {}, fmtSlots(c.since_maintenance_slots)), h("span", {}, Math.round(100 * c.since_maintenance_slots / interval) + " %")));
+}
+
+/* =========================================================================
+   RENDER: KPI TILES, FILTERS, TABLE
+   ========================================================================= */
+function tile(label, value, hint) {
+  return h("div", { class: "tile" }, h("div", { class: "label" }, label), h("div", { class: "value num" }, value), hint ? h("div", { class: "hint" }, hint) : null);
+}
+function renderKpis(list) {
+  const sum = (f) => list.reduce((a, s) => a + (f(s) || 0), 0);
+  const ds = list.map((s) => [s, derive(s)]);
+  const reporting = ds.filter(([s]) => Date.now() / 1000 - s.reported_unix < 2 * 3600).length;
+  const due = ds.filter(([, d]) => d.status === "Due").length;
+  const soon = ds.filter(([, d]) => d.status === "Due soon").length;
+  const offline = ds.filter(([, d]) => d.offline).length;
+  const rails = ds.filter(([, d]) => d.rail);
+  const noLeds = rails.filter(([, d]) => d.status === "LEDs not found").length;
+  const crashes = Object.values(S.crashes).reduce((a, b) => a + b, 0);
+  /* (a tile left out is null; replaceChildren would print it as "null") */
+  $("kpis").replaceChildren(...[
+    tile("Deployments", fmt(list.length), `${reporting} reported in the last 2 h` + (offline ? ` · ${offline} silent 26 h+` : "")),
+    /* only when the fleet has Assembly Rails: how many, and LED strips not found */
+    rails.length ? tile("Assembly Rails", fmt(rails.length), noLeds ? h("span", { class: "bad" }, `${noLeds} with LEDs not found`) : "all LEDs connected") : null,
+    tile("Garments today", fmt(sum((s) => s.today && s.today.garments_processed)), `${fmt(sum((s) => s.yesterday && s.yesterday.garments))} yesterday`),
+    tile("Orders today", fmt(sum((s) => s.today && s.today.orders_completed)), `${fmt(sum((s) => s.yesterday && s.yesterday.orders))} yesterday`),
+    tile("Garments this month", fmt(sum((s) => s.month && s.month.garments)), `${fmt(sum((s) => s.month && s.month.orders))} orders`),
+    /* the title says "Slots", so the big number is just "13.14k" (fits on one line) */
+    tile("Slots moved today", fmtK(ds.reduce((a, [, d]) => a + d.todaySlots, 0)), `${fmtSlots(ds.reduce((a, [, d]) => a + d.lifetimeSlots, 0))} lifetime`),
+    tile("Maintenance due", fmt(due), soon ? [statusEl("warning", "~", ""), `${soon} due soon`] : "none due soon"),
+    tile("Open crash reports", fmt(crashes), crashes ? "see the crash issues on GitHub" : "no open crashes"),
+  ].filter(Boolean));
+}
+/* [key, label, test, only shown when the fleet has Assembly Rails]
+   The maintenance filters only ever match conveyor stations. */
+const FILTERS = [
+  ["all", "All", () => true],
+  ["conveyor", "Conveyors", (s, d) => !d.rail, true],
+  ["rail", "Assembly Rails", (s, d) => d.rail, true],
+  ["due", "Maintenance due", (s, d) => !d.rail && d.status === "Due"],
+  ["soon", "Due soon", (s, d) => !d.rail && d.status === "Due soon"],
+  ["leds", "LEDs not found", (s, d) => d.rail && d.status === "LEDs not found", true],
+  ["silent", "No report 26 h+", (s, d) => d.offline],
+  ["crash", "Crashes", (s, d) => d.crashes > 0],
+];
+function renderChips(list) {
+  const ds = list.map((s) => [s, derive(s)]);
+  const hasRails = ds.some(([, d]) => d.rail);
+  /* a rail-only filter that was chosen but no longer applies goes back to "All" */
+  if (!hasRails && FILTERS.some(([k, , , railOnly]) => k === S.filter && railOnly)) S.filter = "all";
+  $("chips").replaceChildren(...FILTERS.filter(([, , , railOnly]) => hasRails || !railOnly).map(([key, label, f]) =>
+    h("button", { class: "chip", type: "button", "aria-pressed": String(S.filter === key), onclick: () => { S.filter = key; render(); } },
+      label, h("span", { class: "count num" }, String(ds.filter(([s, d]) => f(s, d)).length)))));
+}
+const COLS = [
+  ["name", "Deployment", (s, d) => d.name.toLowerCase()],
+  /* Conveyor / Assembly Rail (rails: hooks and the LED strip under it) */
+  ["type", "Type", (s, d) => (d.rail ? 1 : 0)],
+  ["report", "Last report", (s) => -(s.reported_unix || 0)],
+  ["g_today", "Garments today", (s) => s.today?.garments_processed || 0, "r"],
+  ["o_today", "Orders today", (s) => s.today?.orders_completed || 0, "r"],
+  ["g_month", "Garments (month)", (s) => s.month?.garments || 0, "r"],
+  ["slots_today", "Slots today", (s, d) => d.todaySlots, "r"],
+  ["maint", "Since maintenance", (s, d) => (d.rail ? -1 : (RANK[d.status] || 0) * 10 + (d.worst?.pct || 0))],
+  ["status", "Status", (s, d) => (d.offline ? 5 : RANK[d.status] || 0)],
+  ["lifetime", "Lifetime slots", (s, d) => d.lifetimeSlots, "r"],
+  ["crash", "Crashes", (s, d) => d.crashes, "r"],
+  ["version", "Version", (s) => s.version || ""],
+  /* short fingerprint of the GitHub token the station uses: after
+     rotate-token.bat, every station should switch to the new id within a
+     day - then the old token can be revoked */
+  ["token", "Token", (s) => s.token_id || ""],
+];
+function renderTable(list) {
+  $("head").replaceChildren(...COLS.map(([key, label, , cls]) => {
+    const on = S.sort.key === key;
+    return h("th", { class: cls, scope: "col", "aria-sort": on ? (S.sort.dir > 0 ? "ascending" : "descending") : null,
+      onclick: () => { S.sort = { key, dir: on ? -S.sort.dir : key === "name" ? 1 : -1 }; render(); } },
+      label, on ? h("span", { class: "arrow" }, S.sort.dir > 0 ? "▲" : "▼") : null);
+  }));
+  const f = FILTERS.find(([k]) => k === S.filter)[2];
+  const q = S.search.trim().toLowerCase();
+  const col = COLS.find(([k]) => k === S.sort.key);
+  let rows = list.map((s) => [s, derive(s)])
+    .filter(([s, d]) => f(s, d))
+    .filter(([s, d]) => !q || [d.name, s.station, s.store_name, s.computer, s.customer, typeName(s)].join(" ").toLowerCase().includes(q));
+  rows.sort((a, b) => { const x = col[2](...a), y = col[2](...b); return (x < y ? -1 : x > y ? 1 : 0) * (col[0] === "report" ? -S.sort.dir : S.sort.dir) || a[1].name.localeCompare(b[1].name); });
+  if (!rows.length) {
+    $("rows").replaceChildren(h("tr", {}, h("td", { colspan: COLS.length, class: "empty" }, list.length ? "No deployment matches the filter." : "No station has reported yet.")));
+    return;
+  }
+  $("rows").replaceChildren(...rows.map(([s, d]) => {
+    const [kind, icon, label] = statusKind(d.status, d.offline);
+    const open = () => openDetail(s);
+    return h("tr", { class: "row", tabindex: "0", onclick: open, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } } },
+      h("td", {}, h("div", { class: "dep-name" }, d.name),
+        h("div", { class: "dep-sub" }, (s.station && s.station !== d.name ? s.station : s.computer || "") + (s.manual_mode ? " · manual mode" : ""))),
+      h("td", {}, h("div", { class: "type" }, typeName(s)),
+        d.rail ? h("div", { class: "dep-sub" }, `${fmt(hookCount(s))} hooks · `, ledsEl(s, false))
+          : h("div", { class: "dep-sub" }, (s.conveyors || []).length === 1 ? "1 conveyor" : `${(s.conveyors || []).length} conveyors`)),
+      h("td", {}, h("div", {}, ago(s.reported_unix)), h("div", { class: "dep-sub" }, usDateTime(s.reported_at))),
+      h("td", { class: "r num" }, fmt(s.today?.garments_processed)),
+      h("td", { class: "r num" }, fmt(s.today?.orders_completed)),
+      h("td", { class: "r num" }, fmt(s.month?.garments)),
+      /* an Assembly Rail moves nothing: no slots, no maintenance bar */
+      h("td", { class: "r num" }, d.rail ? h("span", { class: "dep-sub" }, "-") : fmtSlots(d.todaySlots)),
+      h("td", {}, d.rail ? h("span", { class: "dep-sub" }, "no maintenance (rail)")
+        : [meter(d.worst, s.maintenance_interval_slots),
+          intervalPending(s) ? h("div", { class: "dep-sub" }, "new interval " + intervalText(setInterval_(s).value) + " pending") : null]),
+      h("td", {}, statusEl(kind, icon, label)),
+      h("td", { class: "r num" }, d.rail ? h("span", { class: "dep-sub" }, "-") : fmtSlots(d.lifetimeSlots)),
+      h("td", { class: "r num" }, d.crashes ? String(d.crashes) : "-"),
+      h("td", { class: "num" }, s.version || "-"),
+      h("td", { class: "num token-id", title: "Token id - the stations switch to a renewed token within a day" }, s.token_id || "-"));
+  }));
+}
+function render() {
+  const list = S.stations;
+  renderKpis(list);
+  renderChips(list);
+  renderTable(list);
+}
+
+/* =========================================================================
+   BAR CHART (single series, last 30 days) with hover tooltip
+   ========================================================================= */
+/* a round tick step so the axis reads 0 / 50 / 100 / 150 ... */
+function niceStep(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+}
+function compact(v) { return v >= 10000 ? Math.round(v / 1000) + "K" : NF.format(Math.round(v)); }
+function barChart(days, values, unitFmt) {
+  const W = 700, H = 170, L = 46, R = 8, T = 10, B = 24;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("role", "img");
+  const top = Math.max(0, ...values.filter((v) => v != null));
+  const step = Math.max(1, niceStep(top / 4));
+  const ticks = Math.max(1, Math.ceil(top / step));
+  const max = step * ticks;
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const mk = (tag, a) => { const e = document.createElementNS(ns, tag); for (const k in a) e.setAttribute(k, a[k]); return e; };
+  for (let i = 0; i <= ticks; i++) {
+    const v = step * i, yy = y(v);
+    svg.append(mk("line", { x1: L, x2: W - R, y1: yy, y2: yy, stroke: "var(--grid)", "stroke-width": 1 }));
+    const t = mk("text", { x: L - 8, y: yy + 4, "text-anchor": "end", "font-size": 11, fill: "var(--muted)" });
+    t.textContent = compact(v);
+    svg.append(t);
+  }
+  const band = (W - L - R) / days.length, bw = Math.min(16, band * 0.66);
+  days.forEach((day, i) => {
+    const v = values[i], x = L + band * i + (band - bw) / 2;
+    if (v != null && v > 0) {
+      const top = y(v), base = y(0), r = Math.min(4, (base - top) / 2, bw / 2);
+      svg.append(mk("path", { fill: "var(--accent)",
+        d: `M${x},${base}V${top + r}Q${x},${top} ${x + r},${top}H${x + bw - r}Q${x + bw},${top} ${x + bw},${top + r}V${base}Z` }));
+    }
+    if (i % Math.ceil(days.length / 8) === 0) {
+      const t = mk("text", { x: L + band * i + band / 2, y: H - 6, "text-anchor": "middle", "font-size": 11, fill: "var(--muted)" });
+      t.textContent = usDate(day).slice(0, 5);
+      svg.append(t);
+    }
+    const hit = mk("rect", { x: L + band * i, y: T, width: band, height: H - T - B, fill: "transparent" });
+    hit.addEventListener("pointermove", (e) => showTip(e, v == null ? "no report" : unitFmt(v), weekday(day) + " " + usDate(day)));
+    hit.addEventListener("pointerleave", hideTip);
+    svg.append(hit);
+  });
+  svg.append(mk("line", { x1: L, x2: W - R, y1: y(0), y2: y(0), stroke: "var(--border)", "stroke-width": 1 }));
+  return svg;
+}
+function weekday(day) { const d = new Date(day + "T12:00:00"); return isNaN(d) ? "" : d.toLocaleDateString("en-US", { weekday: "short" }); }
+function showTip(e, value, label) {
+  const t = $("tip");
+  t.replaceChildren(h("b", { class: "num" }, value), h("span", {}, label));
+  t.hidden = false;
+  const x = Math.min(window.innerWidth - t.offsetWidth - 8, e.clientX + 14), y = Math.max(8, e.clientY - t.offsetHeight - 10);
+  t.style.left = x + "px"; t.style.top = y + "px";
+}
+function hideTip() { $("tip").hidden = true; }
+
+/* =========================================================================
+   DETAIL DRAWER FOR ONE DEPLOYMENT
+   ========================================================================= */
+/* the "Assembly Rail" panel in a rail station's details: its hooks, the LED
+   strip (red when not found) and Split Orders. No maintenance: nothing moves. */
+function railPanel(st) {
+  const r = st.rail || {};
+  const row = (k, v) => h("tr", {}, h("td", {}, k), h("td", { class: "r" }, v));
+  return h("section", { class: "panel" }, h("h3", {}, r.name || "Assembly Rail"),
+    h("table", { class: "mini" }, h("tbody", {},
+      row("Hooks", h("span", { class: "num" }, isFinite(r.first_slot) && isFinite(r.last_slot)
+        ? `${fmt(hookCount(st))} (hooks ${r.first_slot}-${r.last_slot})` : fmt(hookCount(st)))),
+      row("Hooks occupied now", h("span", { class: "num" }, `${fmt(st.today?.slots_occupied)} / ${fmt(hookCount(st))}`)),
+      row("LED lights", ledsEl(st, true)),
+      row("Split Orders", splitText(st, true)))),
+    ledsConnected(st) === false
+      ? h("p", { class: "set-msg error" }, "The station cannot light the hooks. Check the LED controller's USB cable, then use \"Look for LEDs again\" on the station's Settings > Station tab.")
+      : null,
+    h("p", { class: "dep-sub", style: "margin:8px 0 0" }, "An Assembly Rail does not move, so it has no slots moved and no maintenance reminders."));
+}
+
+let lastFocus = null;
+function closeDetail() {
+  $("drawer").hidden = true; $("scrim").hidden = true; hideTip();
+  if (lastFocus) lastFocus.focus();
+}
+async function openDetail(st) {
+  lastFocus = document.activeElement;
+  const d = derive(st);
+  const dr = $("drawer");
+  const [kind, icon, label] = statusKind(d.status, d.offline);
+  const kv = (k, v) => h("div", {}, h("div", { class: "k" }, k), h("div", { class: "v" }, v));
+  const t = st.today || {};
+  const prodRows = [
+    ["Today (so far)", `${fmt(t.garments_processed)} of ${fmt(t.garments_due)} due`, `${fmt(t.orders_completed)} of ${fmt(t.orders_due)} due`],
+    ["Yesterday", fmt(st.yesterday?.garments), fmt(st.yesterday?.orders)],
+    ["This week", fmt(st.week?.garments), fmt(st.week?.orders)],
+    ["This month", fmt(st.month?.garments), fmt(st.month?.orders)],
+  ];
+  const histBox = h("div", { class: "charts" }, h("p", { class: "dep-sub" }, "Loading the last 30 days..."));
+  dr.replaceChildren(
+    h("div", { class: "drawer-head" },
+      h("div", {}, h("h2", { id: "d-title" }, d.name), h("div", { class: "sub" }, st.station)),
+      h("button", { class: "btn", type: "button", onclick: closeDetail, "aria-label": "Close" }, "Close")),
+    h("div", { class: "drawer-body" },
+      h("section", { class: "panel" },
+        h("div", { class: "meta" },
+          kv("Status", statusEl(kind, icon, label)),
+          kv("Last report", ago(st.reported_unix) + (st.reported_at ? ` (${usDateTime(st.reported_at)})` : "")),
+          kv("Customer", st.customer || "-"),
+          kv("Store number", st.store_number || "-"),
+          kv("Store name", st.store_name || "-"),
+          kv("Computer", st.computer || "-"),
+          kv("Token id", st.token_id || "-"),
+          kv("Software version", st.version || "-"),
+          kv("Station type", d.rail ? "Assembly Rail" : st.manual_mode ? "Conveyor (manual assembly mode)" : "Conveyor"),
+          kv(d.rail ? "Hooks occupied" : "Slots occupied", `${fmt(t.slots_occupied)} / ${fmt(d.rail ? hookCount(st) : st.total_slots)}`),
+          kv("Split Orders", splitText(st, d.rail)),
+          kv("Items per hour", fmt(t.items_per_hour)),
+          kv("Today", `${fmt(t.percent_complete)} % complete · ${t.behind ? "behind" : "ahead"}`),
+          kv("GitHub", st.url ? h("a", { href: st.url, target: "_blank", rel: "noopener" }, `Issue #${st.issue}`) : "demo data"))),
+      h("section", { class: "panel" }, h("h3", {}, "Garments and orders"),
+        h("table", { class: "mini" },
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", { class: "r" }, "Garments"), h("th", { class: "r" }, "Orders"))),
+          h("tbody", {}, prodRows.map(([a, b, c]) => h("tr", {}, h("td", {}, a), h("td", { class: "r num" }, b), h("td", { class: "r num" }, c)))))),
+      d.rail ? railPanel(st) : h("section", { class: "panel" }, h("h3", {}, "Conveyors and slots moved"),
+        (st.conveyors || []).map((c) => {
+          const [k2, i2, l2] = statusKind(c.status, false);
+          return h("div", { class: "conv" },
+            h("div", { class: "conv-head" }, h("b", {}, c.name), h("span", { class: "dep-sub" }, `slots ${c.first_slot}-${c.last_slot}`), statusEl(k2, i2, l2)),
+            meter(c, st.maintenance_interval_slots),
+            h("table", { class: "mini", style: "margin-top:8px" }, h("tbody", {},
+              h("tr", {}, h("td", {}, "Since last maintenance"), h("td", { class: "r num" }, fmtSlots(c.since_maintenance_slots)), h("td", { class: "dep-sub" }, c.last_maintenance ? usDateTime(c.last_maintenance) : "never maintained")),
+              h("tr", {}, h("td", {}, "Today / this week / this month"), h("td", { class: "r num", colspan: 2 }, `${fmtSlots(c.today_slots)} / ${fmtSlots(c.week_slots)} / ${fmtSlots(c.month_slots)}`)),
+              h("tr", {}, h("td", {}, "Lifetime (forward / backward)"), h("td", { class: "r num", colspan: 2 }, `${fmtSlots(c.lifetime_slots)} (${fmtK(c.lifetime_forward_slots)} / ${fmtK(c.lifetime_backward_slots)})`)),
+              h("tr", {}, h("td", {}, "Moves (lifetime)"), h("td", { class: "r num", colspan: 2 }, fmt(c.lifetime_moves))))));
+        })),
+      d.rail ? null : intervalPanel(st),
+      h("section", { class: "panel" }, h("h3", {}, "Last 30 days"), histBox)));
+  dr.hidden = false; $("scrim").hidden = false;
+  dr.querySelector(".drawer-head .btn").focus();
+  /* history */
+  try {
+    const byDay = S.demo ? S.history[st.issue] || {} : (S.history[st.issue] = S.history[st.issue] || await loadHistory(st));
+    const days = [];
+    for (let k = 30; k >= 1; k--) days.push(new Date(Date.now() - k * 86400000).toISOString().slice(0, 10));
+    const pick = (f) => days.map((day) => (byDay[day] ? f(byDay[day]) : null));
+    const reported = days.filter((dd) => byDay[dd]).length;
+    if (!reported) { histBox.replaceChildren(h("p", { class: "dep-sub" }, "No daily summaries yet - they start the day after the station's first report.")); return; }
+    const chartBlock = (title, sub, vals, f) => h("div", { class: "chart" }, h("p", { class: "chart-title" }, title), h("p", { class: "chart-sub" }, sub), barChart(days, vals, f));
+    const dist = pick((x) => x.slots), gar = pick((x) => x.garments), ord = pick((x) => x.orders);
+    const total = (v) => v.reduce((a, b) => a + (b || 0), 0);
+    /* an Assembly Rail moves nothing: no "Slots moved" chart or column */
+    const moves = !d.rail;
+    /* (replaceChildren would print a null as the text "null", so the
+       left-out chart is filtered away first) */
+    histBox.replaceChildren(...[
+      chartBlock("Garments processed per day", `${fmt(total(gar))} in 30 days`, gar, (v) => fmt(v) + " garments"),
+      chartBlock("Orders completed per day", `${fmt(total(ord))} in 30 days`, ord, (v) => fmt(v) + " orders"),
+      moves ? chartBlock("Slots moved per day", `${fmtSlots(total(dist))} in 30 days`, dist, fmtSlots) : null,
+      h("details", {}, h("summary", {}, "Show the daily numbers as a table"),
+        h("table", { class: "mini", style: "margin-top:8px" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Day"), h("th", { class: "r" }, "Garments"), h("th", { class: "r" }, "Orders"), moves ? h("th", { class: "r" }, "Slots moved") : null)),
+          h("tbody", {}, days.slice().reverse().filter((dd) => byDay[dd]).map((dd) =>
+            h("tr", {}, h("td", {}, weekday(dd) + " " + usDate(dd)), h("td", { class: "r num" }, fmt(byDay[dd].garments)),
+              h("td", { class: "r num" }, fmt(byDay[dd].orders)), moves ? h("td", { class: "r num" }, fmtSlots(byDay[dd].slots)) : null)))))].filter(Boolean));
+  } catch (e) {
+    histBox.replaceChildren(h("p", { class: "note error" }, "Could not load the history: " + e.message));
+  }
+}
+
+/* =========================================================================
+   CONNECT / LOAD
+   ========================================================================= */
+function showConnect() {
+  $("in-repo").value = S.repo;
+  $("in-token").value = "";
+  $("in-token").placeholder = S.token ? "saved - leave empty to keep it" : "github_pat_...";
+  $("connect").hidden = false;
+  $("dash").hidden = true;
+}
+async function refresh() {
+  if (S.demo) {
+    const d = demoFleet();
+    S.stations = d.stations.map(normalizeStation); S.crashes = d.crashes; S.history = d.history;
+    if (!S.fleet.issue && S.fleet.def == null) S.fleet = { issue: null, url: null, def: 250000, stations: {} };
+    $("subtitle").textContent = "Demo data - made-up deployments";
+    $("connect").hidden = true; $("dash").hidden = false;
+    note("Showing made-up demo data. Use Connection to connect to your fleet repository.");
+    render();
+    return;
+  }
+  if (!S.repo || !S.token) { showConnect(); note(""); return; }
+  note("Loading from GitHub...");
+  try {
+    const d = await loadFleet();
+    S.stations = d.stations; S.crashes = d.crashes; S.history = {}; S.fleet = d.fleet;
+    $("subtitle").textContent = "github.com/" + S.repo;
+    $("connect").hidden = true; $("dash").hidden = false;
+    note(`Updated ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · ${S.stations.length} deployments`);
+    render();
+  } catch (e) {
+    note(e.message, true);
+    if (!S.stations.length) showConnect();
+  }
+}
+
+$("connect-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const repo = $("in-repo").value.trim().replace(/^https?:\/\/(www\.)?github\.com\//, "").replace(/\.git$|\/$/g, "");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { note("Enter the repository as owner/name.", true); return; }
+  const tok = $("in-token").value.trim() || S.token;
+  if (!tok) { note("Enter the read-only token.", true); return; }
+  S.repo = repo; S.token = tok; S.demo = false;
+  const remember = $("in-remember").checked;
+  store.set(KEY_REPO, repo);
+  store.set(KEY_TOKEN, remember ? tok : null);
+  refresh();
+});
+$("btn-demo").addEventListener("click", () => { S.demo = true; refresh(); });
+$("btn-refresh").addEventListener("click", refresh);
+$("btn-fleet").addEventListener("click", () => { if (!$("dash").hidden) openFleetSettings(); });
+$("btn-settings").addEventListener("click", () => { S.demo = false; showConnect(); note(""); });
+$("search").addEventListener("input", (e) => { S.search = e.target.value; renderTable(S.stations); });
+$("scrim").addEventListener("click", closeDetail);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("drawer").hidden) closeDetail(); });
+/* refresh by itself every 10 minutes while the page is open */
+setInterval(() => { if (!$("dash").hidden && document.visibilityState === "visible" && $("drawer").hidden) refresh(); }, 10 * 60 * 1000);
+refresh();
+</script>
+</body>
+</html>
